@@ -123,7 +123,7 @@ def main() -> None:
             break
         if again != "y":
             break
-    print("Thanks for playing!")
+    print("THANKS FOR PLAYING!")
 
 
 if __name__ == "__main__":
