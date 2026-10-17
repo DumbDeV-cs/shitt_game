@@ -124,7 +124,7 @@ def main() -> None:
         if again != "y":
             break
     print("THANKS FOR PLAYING!")
-
+#this is a comment
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
