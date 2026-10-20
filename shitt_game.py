@@ -2,7 +2,7 @@
 """Word Guess: a Wordle-style game for the terminal.
 
 Guess the secret 5-letter word in 6 tries.
-  green  = right letter, right spot
+  Green 💚 = right letter, right spot
   yellow = right letter, wrong spot
   grey   = letter not in the word (or already used up)
 
