@@ -19,6 +19,7 @@ Run:  python shitt_game.py          Textual UI (default)
       python shitt_game.py --selftest
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -345,24 +346,6 @@ if App is not None:
             color: #ffffff;
         }
 
-        Tile.flip-in {
-            animation: flip-in 150ms ease-in forwards;
-        }
-
-        Tile.flip-out {
-            animation: flip-out 150ms ease-out forwards;
-        }
-
-        @keyframes flip-in {
-            0% { transform: rotateY(0deg); }
-            100% { transform: rotateY(90deg); }
-        }
-
-        @keyframes flip-out {
-            0% { transform: rotateY(90deg); }
-            100% { transform: rotateY(0deg); }
-        }
-
         #message {
             text-align: center;
             margin: 1 0;
@@ -471,68 +454,56 @@ if App is not None:
             yield Label("WORD GUESS", id="title")
             yield Static("Guess the secret word before you run out of tries.", id="subtitle")
             with Container(id="views"):
-                yield self._menu_view()
-                yield self._game_view()
-                yield self._stats_view()
-                yield self._diff_view()
+                # menu view
+                with Container(id="menu", classes="view active"):
+                    yield Vertical(
+                        Button("1  Play", id="btn-play", classes="menu-btn -active"),
+                        Button("2  Stats", id="btn-stats", classes="menu-btn"),
+                        Button("3  Difficulty", id="btn-diff", classes="menu-btn"),
+                        Button("4  Quit", id="btn-quit", classes="menu-btn"),
+                    )
+                    yield Static(f"Difficulty: {DIFFICULTIES[self.difficulty]['label']}", id="menu-diff")
+                    yield Static(f"Streak: {self.stats.streak}  ·  Best: {self.stats.max_streak}", id="menu-streak")
+                # game view
+                with Container(id="game", classes="view"):
+                    with Horizontal(id="header-row"):
+                        yield Static("Medium", id="diff-chip")
+                        yield Static("", id="stats-line")
+                    yield Static("", id="clue")
+                    for r in range(8):
+                        with Horizontal(classes="GuessRow", id=f"row-{r}"):
+                            for c in range(WORD_LEN):
+                                yield Tile(r, c)
+                    yield Static("", id="message")
+                    with Container(id="keyboard"):
+                        for i, row in enumerate(["qwertyuiop", "asdfghjkl", "zxcvbnm"]):
+                            with Horizontal(classes="KeyRow", id=f"krow-{i}"):
+                                for ch in row:
+                                    yield Key(ch)
+                # stats view
+                with Container(id="stats-view", classes="view"):
+                    with Vertical():
+                        yield Static("S T A T S", classes="stat-line")
+                        yield Static(f"Games played : {self.stats.games}", classes="stat-line")
+                        yield Static(f"Games won    : {self.stats.wins}", classes="stat-line")
+                        yield Static(f"Win rate     : {self.stats.wins * 100 // max(1, self.stats.games)}%", classes="stat-line")
+                        yield Static(f"Current streak: {self.stats.streak}   Best streak : {self.stats.max_streak}", classes="stat-line")
+                        yield Static(f"Hard-mode wins: {self.stats.hard_wins}", classes="stat-line")
+                        yield Static(f"Hints used   : {self.stats.total_hints}   Undos used   : {self.stats.total_undos}", classes="stat-line")
+                        yield Static("", id="stats-dist")
+                        yield Static("Press any key to return", classes="hint")
+                # difficulty view
+                with Container(id="diff-view", classes="view"):
+                    with Vertical():
+                        yield Static("D I F F I C U L T Y", classes="stat-line")
+                        yield Static("Pick a difficulty:", classes="stat-line")
+                        yield Button("1  Easy   (8 tries, 2 hints)", id="d-easy", classes="menu-btn")
+                        yield Button("2  Medium (6 tries, 1 hint)", id="d-medium", classes="menu-btn")
+                        yield Button("3  Hard   (5 tries, hard mode)", id="d-hard", classes="menu-btn")
+                        yield Static("", id="diff-hard-note")
+                        yield Static("Press any key to return", classes="hint")
             yield Footer()
             yield Static("Enter: submit  Bksp: delete  Alt+H: hint  Alt+U: undo  Esc: menu", id="footer")
-
-        def _menu_view(self) -> Container:
-            with Container(id="menu", classes="view active") as m:
-                yield Vertical(
-                    Button("1  Play", id="btn-play", classes="menu-btn -active"),
-                    Button("2  Stats", id="btn-stats", classes="menu-btn"),
-                    Button("3  Difficulty", id="btn-diff", classes="menu-btn"),
-                    Button("4  Quit", id="btn-quit", classes="menu-btn"),
-                )
-                yield Static(f"Difficulty: {DIFFICULTIES[self.difficulty]['label']}", id="menu-diff")
-                yield Static(f"Streak: {self.stats.streak}  ·  Best: {self.stats.max_streak}", id="menu-streak")
-            return m
-
-        def _game_view(self) -> Container:
-            with Container(id="game", classes="view") as g:
-                with Horizontal(id="header-row"):
-                    yield Static("Medium", id="diff-chip")
-                    yield Static("", id="stats-line")
-                yield Static("", id="clue")
-                for r in range(8):  # max possible tries
-                    with Horizontal(classes="GuessRow", id=f"row-{r}"):
-                        for c in range(WORD_LEN):
-                            yield Tile(r, c)
-                yield Static("", id="message")
-                with Container(id="keyboard"):
-                    for i, row in enumerate(["qwertyuiop", "asdfghjkl", "zxcvbnm"]):
-                        with Horizontal(classes="KeyRow", id=f"krow-{i}"):
-                            for ch in row:
-                                yield Key(ch)
-            return g
-
-        def _stats_view(self) -> Container:
-            with Container(id="stats-view", classes="view") as s:
-                with Vertical():
-                    yield Static("S T A T S", classes="stat-line")
-                    yield Static(f"Games played : {self.stats.games}", classes="stat-line")
-                    yield Static(f"Games won    : {self.stats.wins}", classes="stat-line")
-                    yield Static(f"Win rate     : {self.stats.wins * 100 // max(1, self.stats.games)}%", classes="stat-line")
-                    yield Static(f"Current streak: {self.stats.streak}   Best streak : {self.stats.max_streak}", classes="stat-line")
-                    yield Static(f"Hard-mode wins: {self.stats.hard_wins}", classes="stat-line")
-                    yield Static(f"Hints used   : {self.stats.total_hints}   Undos used   : {self.stats.total_undos}", classes="stat-line")
-                    yield Static("", id="stats-dist")
-                    yield Static("Press any key to return", classes="hint")
-            return s
-
-        def _diff_view(self) -> Container:
-            with Container(id="diff-view", classes="view") as d:
-                with Vertical():
-                    yield Static("D I F F I C U L T Y", classes="stat-line")
-                    yield Static("Pick a difficulty:", classes="stat-line")
-                    yield Button("1  Easy   (8 tries, 2 hints)", id="d-easy", classes="menu-btn")
-                    yield Button("2  Medium (6 tries, 1 hint)", id="d-medium", classes="menu-btn")
-                    yield Button("3  Hard   (5 tries, hard mode)", id="d-hard", classes="menu-btn")
-                    yield Static("", id="diff-hard-note")
-                    yield Static("Press any key to return", classes="hint")
-            return d
 
         # -- lifecycle -----------------------------------------------------
         def on_mount(self) -> None:
@@ -582,6 +553,8 @@ if App is not None:
                     self.difficulty = "medium"
                 elif ch == "3":
                     self.difficulty = "hard"
+                else:
+                    self.state = "menu"
                 self.refresh_diff_view()
                 self.refresh_ui()
                 return
@@ -722,19 +695,12 @@ if App is not None:
                 self.show_message(f"Out of tries. The word was {self.secret.upper()}.", "#ff3b30")
 
         async def flip_tile(self, r: int, c: int, letter: str, mark: str) -> None:
+            """Wordle-style reveal: blank the tile, then show the colored letter."""
             tile = self.rows[(r, c)]
-            tile.add_class("flip-in")
-            await self._sleep(0.15)
-            tile.set_letter(letter, mark)
-            tile.remove_class("flip-in")
-            tile.add_class("flip-out")
-            await self._sleep(0.15)
-            tile.remove_class("flip-out")
-
-        async def _sleep(self, seconds: float) -> None:
-            # Textual provides a way to sleep within the app loop.
-            import asyncio
-            await asyncio.sleep(seconds)
+            tile.set_letter("")                  # blank (the "flip" hides the face)
+            await asyncio.sleep(0.12)
+            tile.set_letter(letter, mark)        # reveal the letter + color
+            await asyncio.sleep(0.08)
 
         def do_hint(self) -> None:
             if self.hints_left <= 0:
@@ -776,10 +742,11 @@ if App is not None:
         # -- refresh -------------------------------------------------------
         def refresh_ui(self) -> None:
             # toggle views
+            view_id = {"menu": "menu", "playing": "game", "stats": "stats-view", "difficulty": "diff-view"}[self.state]
             for vid in ("menu", "game", "stats-view", "diff-view"):
                 widget = self.query_one(f"#{vid}")
                 widget.remove_class("active")
-            self.query_one(f"#{self.state}-view" if self.state in ("menu", "stats", "difficulty") else "#game").add_class("active")
+            self.query_one(f"#{view_id}").add_class("active")
 
             if self.state == "menu":
                 self.refresh_menu()
