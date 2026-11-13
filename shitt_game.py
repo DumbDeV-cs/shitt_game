@@ -418,10 +418,6 @@ if App is not None:
         """
 
         BINDINGS = [
-            Binding("enter", "submit", "Submit guess", show=True),
-            Binding("backspace", "delete", "Delete", show=True),
-            Binding("delete", "delete", "Delete", show=True),
-            Binding("escape", "menu", "Menu / Quit", show=True),
             Binding("alt+h", "hint", "Hint", show=True),
             Binding("alt+u", "undo", "Undo", show=True),
             Binding("q", "quit", "Quit", show=False),
@@ -507,6 +503,8 @@ if App is not None:
 
         # -- lifecycle -----------------------------------------------------
         def on_mount(self) -> None:
+            self.rows = {(t.r, t.c): t for t in self.query(Tile)}
+            self.keys = {k.ch: k for k in self.query(Key)}
             self.refresh_ui()
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -598,7 +596,13 @@ if App is not None:
             if not ok:
                 self.show_message(why, "#ff3b30")
                 return
-            self.submit_guess(self.current)
+            guess = self.current
+            self.current = ""
+            self.message = ""
+            marks = score(self.secret, guess)
+            self.guesses.append((guess, marks))
+            self.animating = True
+            asyncio.create_task(self.reveal_guess(len(self.guesses) - 1, guess, marks))
 
         def action_delete(self) -> None:
             if self.state == "playing" and not self.animating:
@@ -607,9 +611,7 @@ if App is not None:
                 self.refresh_ui()
 
         def action_menu(self) -> None:
-            if self.state == "playing":
-                self.state = "menu"
-            elif self.state == "menu":
+            if self.state == "menu":
                 self.exit()
             else:
                 self.state = "menu"
@@ -672,13 +674,10 @@ if App is not None:
                     return False, f"{c.upper()} is not in the word."
             return True, ""
 
-        def submit_guess(self, guess: str) -> None:
-            marks = score(self.secret, guess)
-            self.guesses.append((guess, marks))
-            # flip animation, one tile at a time
-            self.animating = True
+        async def reveal_guess(self, r: int, guess: str, marks: list[str]) -> None:
+            """Animate the tiles one by one, then finalise the guess."""
             for c in range(WORD_LEN):
-                self.flip_tile(len(self.guesses) - 1, c, guess[c], marks[c])
+                await self.flip_tile(r, c, guess[c], marks[c])
             self.animating = False
             for ch, m in zip(guess, marks):
                 if ch not in self.used or RANK[m] > RANK[self.used[ch]]:
