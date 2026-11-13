@@ -476,7 +476,7 @@ class UI:
                 self.put(y_kb + i, f" {ch.upper()} ", attr, x + j * 4)
 
         if self.mode == "playing":
-            help_text = "Enter: guess  Bksp: delete  H: hint  U: undo  Esc: menu"
+            help_text = "Enter: guess  Bksp: delete  Alt+H: hint  Alt+U: undo  Esc: menu"
         else:
             help_text = "Enter: play again  Esc: menu"
         self.put(y_kb + 4, help_text, self.pair(8) | curses.A_DIM)
@@ -542,7 +542,16 @@ class UI:
 
             elif self.mode == "playing":
                 if key == 27:
-                    self.mode = "menu"
+                    # Alt+key arrives as ESC <char>; plain ESC should feel instant.
+                    self.stdscr.timeout(50)
+                    meta = self.stdscr.getch()
+                    self.stdscr.timeout(-1)  # back to blocking
+                    if meta == ord("h") or meta == ord("H"):
+                        self.do_hint()
+                    elif meta == ord("u") or meta == ord("U"):
+                        self.do_undo()
+                    else:
+                        self.mode = "menu"
                 elif key in self.BACK_KEYS:
                     self.current = self.current[:-1]
                     self.message = ""
