@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Word Guess: a colorful Wordle-style game for the terminal.
+"""Word Guess — a professional Wordle-style terminal game built with Textual.
 
 Guess the secret word in a limited number of tries.
   green  = right letter, right spot
@@ -10,11 +10,11 @@ Features:
   * Three difficulties: Easy (8 tries, 2 hints), Medium (6 tries, 1 hint),
     Hard (5 tries, no hints, hard mode on)
   * Optional hard mode: you must reuse revealed hints in later guesses
-  * Hints and one undo per game
+  * Hints (Alt+H) and one undo per game (Alt+U)
   * Persistent stats: streak, best streak, win distribution, hard wins
-  * Rainbow title, animated tiles, colorful keyboard
+  * Wordle-style tile flip animations and a professional keyboard
 
-Run:  python shitt_game.py          full-screen terminal UI
+Run:  python shitt_game.py          Textual UI (default)
       python shitt_game.py --plain  simple text mode
       python shitt_game.py --selftest
 """
@@ -28,11 +28,21 @@ import tempfile
 import zlib
 
 try:
-    import curses
-except ImportError:
-    curses = None
+    from textual.app import App, ComposeResult
+    from textual.containers import Container, Horizontal, Vertical
+    from textual.events import Key
+    from textual.reactive import reactive
+    from textual.widget import Widget
+    from textual.widgets import Static, Label, Button, Footer
+    from textual.binding import Binding
+except ImportError:  # pragma: no cover - fallback when Textual is missing
+    App = None  # type: ignore
 
-# The word list is stored compressed so the answers can't be spoiled by reading this file.
+
+# ---------------------------------------------------------------------------
+# Game core (shared by every UI)
+# ---------------------------------------------------------------------------
+
 _WORD_BLOB = (
     "eJwlllt2riAMRqfi1FBRaZFQLr/Hjv7sL33ZixViyI1gWG2OJaz2iUvYhrUl7DMjOUZkfYZUYIvs"
     "5tBuuE4xNnRy0lflbO8Sas2sWywBnlPr1MVbNlsL6PS0I+k98u3H0r6EJ3xHsfm6xWUNe37hN6ev"
@@ -70,19 +80,6 @@ DIFFICULTIES = {
 
 RANK = {"x": 0, "y": 1, "g": 2}
 
-# ANSI colors for plain text mode
-BOLD = "\033[1m"
-DIM = "\033[2m"
-RESET = "\033[0m"
-GREEN = "\033[42;30m"
-YELLOW = "\033[43;30m"
-GREY = "\033[100;97m"
-CYAN = "\033[36m"
-MAGENTA = "\033[35m"
-RED = "\033[31m"
-BLUE = "\033[34m"
-RAINBOW = [CYAN, MAGENTA, YELLOW, GREEN, RED]
-
 
 def score(secret: str, guess: str) -> list[str]:
     """Return a list of 'g' / 'y' / 'x' for each letter, handling repeated letters correctly."""
@@ -99,24 +96,6 @@ def score(secret: str, guess: str) -> list[str]:
             result[i] = "y"
             remaining[g] -= 1
     return result
-
-
-def render(guess: str, marks: list[str]) -> str:
-    colors = {"g": GREEN + BOLD, "y": YELLOW + BOLD, "x": GREY + BOLD}
-    return " ".join(f"{colors[m]} {c.upper()} {RESET}" for c, m in zip(guess, marks))
-
-
-def keyboard(used: dict[str, str]) -> str:
-    colors = {"g": GREEN + BOLD, "y": YELLOW + BOLD, "x": GREY + BOLD}
-    rows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
-    lines = []
-    for i, row in enumerate(rows):
-        cells = [
-            f"{colors[used[c]]} {c.upper()} {RESET}" if c in used else f"{DIM} {c.upper()} {RESET}"
-            for c in row
-        ]
-        lines.append(" " * (i * 2) + "".join(cells))
-    return "\n".join(lines)
 
 
 class GameStats:
@@ -164,7 +143,7 @@ class GameStats:
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except OSError:
-            pass  # stats are nice-to-have; never crash the game over them
+            pass
 
     def record(self, won: bool, turn, hard: bool, hints: int, undos: int):
         self.games += 1
@@ -184,386 +163,704 @@ class GameStats:
 
 
 # ---------------------------------------------------------------------------
-# Full-screen curses UI
+# Textual UI
 # ---------------------------------------------------------------------------
 
-class UI:
-    def __init__(self, stdscr):
-        self.stdscr = stdscr
-        curses.curs_set(0)
-        curses.start_color()
-        curses.use_default_colors()
-        self.has_color = curses.COLORS >= 8
-        grey_bg = 8 if curses.COLORS >= 16 else curses.COLOR_BLUE
-        try:
-            curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_GREEN)   # green tile
-            curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_YELLOW)  # yellow tile
-            curses.init_pair(3, curses.COLOR_WHITE, grey_bg)              # grey tile
-            curses.init_pair(4, curses.COLOR_CYAN, -1)                    # primary / title
-            curses.init_pair(5, curses.COLOR_RED, -1)                     # error / lost
-            curses.init_pair(6, curses.COLOR_GREEN, -1)                   # win / praise
-            curses.init_pair(7, curses.COLOR_MAGENTA, -1)                 # hints / magic
-            curses.init_pair(8, curses.COLOR_BLUE, -1)                    # hidden / dim
-            curses.init_pair(9, curses.COLOR_YELLOW, -1)                  # accent
-        except curses.error:
-            self.has_color = False
+if App is not None:
 
-        self.stats = GameStats(STATS_FILE)
-        self.difficulty = "medium"
-        self.hard_override = False
-        self.mode = "menu"        # menu | stats | difficulty | playing | won | lost
-        self.menu_sel = 0
-        self.diff_sel = 0
-        self.reset_game()
+    class Tile(Static):
+        """A single letter tile with Wordle-style flip animation."""
 
-    # -- colors -----------------------------------------------------------
-    def pair(self, n: int) -> int:
-        return curses.color_pair(n) if self.has_color else 0
+        def __init__(self, r: int, c: int):
+            super().__init__("", id=f"tile-{r}-{c}")
+            self.r = r
+            self.c = c
 
-    def tile_attr(self, mark: str, hidden: bool = False) -> int:
-        if hidden:
-            return self.pair(8) | curses.A_DIM
-        base = {"g": 1, "y": 2, "x": 3}.get(mark, 8)
-        return self.pair(base) | curses.A_BOLD
-
-    # -- drawing helpers --------------------------------------------------
-    def put(self, y: int, text: str, attr: int = 0, x: int | None = None):
-        _, w = self.stdscr.getmaxyx()
-        if x is None:
-            x = max(0, (w - len(text)) // 2)
-        try:
-            self.stdscr.addstr(y, x, text, attr)
-        except curses.error:
-            pass  # bottom-right corner raises; harmless
-
-    def put_rainbow(self, y: int, text: str, x: int | None = None):
-        _, w = self.stdscr.getmaxyx()
-        if x is None:
-            x = max(0, (w - len(text)) // 2)
-        rainbow = [4, 7, 9, 6, 5]
-        cx = x
-        for i, ch in enumerate(text):
-            if ch == " ":
-                cx += 1
-                continue
-            attr = self.pair(rainbow[i % len(rainbow)]) | curses.A_BOLD
-            try:
-                self.stdscr.addstr(y, cx, ch, attr)
-            except curses.error:
-                pass
-            cx += 1
-
-    # -- game state -------------------------------------------------------
-    def reset_game(self):
-        d = DIFFICULTIES[self.difficulty]
-        self.secret = random.choice(WORDS)
-        self.tries_allowed = d["tries"]
-        self.hints_left = d["hints"]
-        self.hard_mode = d["hard"] or self.hard_override
-        self.guesses = []          # list of (word, marks)
-        self.current = ""
-        self.used = {}             # letter -> best mark
-        self.mode = "playing"
-        self.message = ""
-        self.msg_attr = 0
-        self.hints_used = 0
-        self.undos_used = 0
-        self.clue = ["_"] * WORD_LEN
-        self.hinted = set()
-
-    def hard_ok(self, guess: str):
-        """Hard mode: guess must respect every revealed hint so far."""
-        if not self.hard_mode or not self.guesses:
-            return True, ""
-        green_at = {}
-        must_have = {}
-        for word, marks in self.guesses:
-            for i, (c, m) in enumerate(zip(word, marks)):
-                if m == "g":
-                    green_at[i] = c
-                if m in ("g", "y"):
-                    must_have[c] = must_have.get(c, 0) + 1
-        for i, c in enumerate(guess):
-            if i in green_at and green_at[i] != c:
-                return False, f"Position {i + 1} must be {green_at[i].upper()}."
-        counts = {}
-        for c in guess:
-            counts[c] = counts.get(c, 0) + 1
-        for c, need in must_have.items():
-            if counts.get(c, 0) < need:
-                return False, f"Must use {c.upper()} at least {need} time(s)."
-        for c in guess:
-            if self.used.get(c) == "x":
-                return False, f"{c.upper()} is not in the word."
-        return True, ""
-
-    def submit_guess(self):
-        guess = self.current
-        if len(guess) != WORD_LEN:
-            self.message, self.msg_attr = "Not enough letters", self.pair(5) | curses.A_BOLD
-            return
-        ok, why = self.hard_ok(guess)
-        if not ok:
-            self.message, self.msg_attr = why, self.pair(5) | curses.A_BOLD
-            return
-        marks = score(self.secret, guess)
-        self.guesses.append((guess, marks))
-        # flip the tiles one by one
-        for reveal in range(1, 6):
-            self.draw_game(reveal)
-            curses.napms(140)
-        for ch, m in zip(guess, marks):
-            if ch not in self.used or RANK[m] > RANK[self.used[ch]]:
-                self.used[ch] = m
-        self.current = ""
-        if guess == self.secret:
-            self.mode = "won"
-            self.stats.record(True, len(self.guesses), self.hard_mode, self.hints_used, self.undos_used)
-            praise = ["Genius!", "Magnificent!", "Splendid!", "Impressive!", "Great!", "Phew!"]
-            self.message = f"{praise[min(len(self.guesses) - 1, 5)]} Solved in {len(self.guesses)}!"
-            self.msg_attr = self.pair(6) | curses.A_BOLD
-        elif len(self.guesses) == self.tries_allowed:
-            self.mode = "lost"
-            self.stats.record(False, None, self.hard_mode, self.hints_used, self.undos_used)
-            self.message = f"Out of tries. The word was {self.secret.upper()}."
-            self.msg_attr = self.pair(5) | curses.A_BOLD
-
-    def do_hint(self):
-        if self.hints_left <= 0:
-            self.message, self.msg_attr = "No hints left.", self.pair(5) | curses.A_BOLD
-            return
-        avail = [i for i in range(WORD_LEN) if i not in self.hinted]
-        if not avail:
-            self.message, self.msg_attr = "Every position already revealed.", self.pair(5) | curses.A_BOLD
-            return
-        i = random.choice(avail)
-        self.hinted.add(i)
-        self.hints_left -= 1
-        self.hints_used += 1
-        self.clue[i] = self.secret[i]
-        self.message = f"Hint: position {i + 1} is {self.secret[i].upper()}!"
-        self.msg_attr = self.pair(7) | curses.A_BOLD
-
-    def do_undo(self):
-        if self.mode != "playing":
-            return
-        if not self.guesses:
-            self.message, self.msg_attr = "Nothing to undo.", self.pair(5) | curses.A_BOLD
-            return
-        if self.undos_used >= 1:
-            self.message, self.msg_attr = "No undos left this game.", self.pair(5) | curses.A_BOLD
-            return
-        self.guesses.pop()
-        self.used = {}
-        for word, marks in self.guesses:
-            for c, m in zip(word, marks):
-                if c not in self.used or RANK[m] > RANK[self.used[c]]:
-                    self.used[c] = m
-        self.undos_used += 1
-        self.message = "Undid last guess."
-        self.msg_attr = self.pair(6) | curses.A_BOLD
-
-    # -- screens ----------------------------------------------------------
-    def draw_menu(self):
-        self.stdscr.erase()
-        h, w = self.stdscr.getmaxyx()
-        self.put_rainbow(0, "W O R D   G U E S S")
-        self.put(2, "Guess the secret word before you run out of tries.", self.pair(8) | curses.A_DIM)
-        if self.stats.games:
-            rate = self.stats.wins * 100 // max(1, self.stats.games)
-            self.put(4, f"Played {self.stats.games}  ·  Won {self.stats.wins} ({rate}%)  ·  "
-                        f"Streak {self.stats.streak} (best {self.stats.max_streak})",
-                     self.pair(6) | curses.A_BOLD)
-        opts = [("1 Play", 0), ("2 Stats", 1), ("3 Difficulty", 2), ("4 Quit", 3)]
-        for i, (label, idx) in enumerate(opts):
-            attr = self.pair(4) | curses.A_BOLD if idx == self.menu_sel else self.pair(9)
-            self.put(7 + i, (">> " if idx == self.menu_sel else "   ") + label, attr)
-        d = DIFFICULTIES[self.difficulty]
-        self.put(13, f"Difficulty: {d['label']}  ({d['tries']} tries, {d['hints']} hint{'s' if d['hints'] != 1 else ''})",
-                 self.pair(7) | curses.A_DIM)
-        self.put(14, "Hard mode: " + ("ON" if self.hard_mode else "off"),
-                 self.pair(5) if self.hard_mode else self.pair(8) | curses.A_DIM)
-        self.put(h - 2, "Arrows to pick  ·  Enter to start  ·  Esc to quit",
-                 self.pair(8) | curses.A_DIM)
-        self.stdscr.refresh()
-
-    def draw_stats(self):
-        self.stdscr.erase()
-        h, w = self.stdscr.getmaxyx()
-        self.put_rainbow(0, "S T A T S")
-        lines = [
-            f"Games played : {self.stats.games}",
-            f"Games won    : {self.stats.wins}",
-            f"Win rate     : {self.stats.wins * 100 // max(1, self.stats.games)}%",
-            f"Current streak: {self.stats.streak}   Best streak : {self.stats.max_streak}",
-            f"Hard-mode wins: {self.stats.hard_wins}",
-            f"Hints used   : {self.stats.total_hints}   Undos used   : {self.stats.total_undos}",
-            "",
-            "Win distribution:",
-        ]
-        for i, line in enumerate(lines):
-            self.put(2 + i, line, self.pair(9) if i < 6 else 0)
-        y = 2 + len(lines)
-        for turn in range(1, 9):
-            count = self.stats.distribution.get(str(turn), 0)
-            bar = "█" * count
-            self.put(y, f"  {turn}: {bar}  {count}", self.pair(6) if count else self.pair(8) | curses.A_DIM)
-            y += 1
-        self.put(h - 2, "Press any key to return", self.pair(8) | curses.A_DIM)
-        self.stdscr.refresh()
-
-    def draw_difficulty(self):
-        self.stdscr.erase()
-        self.put_rainbow(0, "D I F F I C U L T Y")
-        self.put(2, "Pick a difficulty:", self.pair(4) | curses.A_BOLD)
-        items = list(DIFFICULTIES.items())
-        for i, (key, d) in enumerate(items):
-            marker = ">> " if key == self.difficulty else "   "
-            line = (f"{marker}{key} {d['label']:<8} {d['tries']} tries, "
-                    f"{d['hints']} hint{'s' if d['hints'] != 1 else ''}")
-            if d["hard"]:
-                line += "   ·   hard mode forced"
-            self.put(4 + i, line, self.pair(7) | curses.A_BOLD if key == self.difficulty else 0)
-        y = 4 + len(items)
-        self.put(y, f"Hard-mode override: {'ON' if self.hard_override else 'off'}  (press t to toggle)",
-                 self.pair(5) if self.hard_override else self.pair(8) | curses.A_DIM)
-        self.put(y + 2, "1/2/3 to pick  ·  Enter to start  ·  Esc to back",
-                 self.pair(8) | curses.A_DIM)
-        self.stdscr.refresh()
-
-    def draw_game(self, reveal: int = 5):
-        self.stdscr.erase()
-        h, w = self.stdscr.getmaxyx()
-        need_h = 3 + self.tries_allowed * 2 + 10
-        if h < need_h or w < 44:
-            self.put(0, "Terminal too small", self.pair(5) | curses.A_BOLD)
-            self.put(1, f"Please resize to at least 44x{need_h}")
-            self.stdscr.refresh()
-            return
-        self.put_rainbow(0, "W O R D   G U E S S")
-        d = DIFFICULTIES[self.difficulty]
-        self.put(1, f"{d['label']}  ·  hints left: {self.hints_left}  ·  "
-                    f"streak: {self.stats.streak}", self.pair(9) | curses.A_DIM)
-        x0 = (w - 29) // 2
-        for r in range(self.tries_allowed):
-            y = 3 + r * 2
-            for c in range(WORD_LEN):
-                x = x0 + c * 6
-                if r < len(self.guesses):
-                    word, marks = self.guesses[r]
-                    fresh = r == len(self.guesses) - 1
-                    shown = c < reveal if fresh else True
-                    ch = word[c].upper() if shown else " "
-                    attr = self.tile_attr(marks[c]) if shown else (curses.A_BOLD | curses.A_UNDERLINE)
-                    self.put(y, f"  {ch}  ", attr, x)
-                elif r == len(self.guesses) and self.mode == "playing" and c < len(self.current):
-                    self.put(y, f"  {self.current[c].upper()}  ",
-                             curses.A_BOLD | curses.A_UNDERLINE | self.pair(4), x)
-                else:
-                    if self.clue[c] != "_":
-                        self.put(y, f"  {self.clue[c].upper()}  ", self.pair(7) | curses.A_BOLD, x)
-                    else:
-                        self.put(y, "  _  ", self.pair(8) | curses.A_DIM, x)
-        y_clue = 3 + self.tries_allowed * 2
-        self.put(y_clue, "Clue: " + " ".join(self.clue), self.pair(7) | curses.A_BOLD, x0)
-        self.put(y_clue + 1, self.message, self.msg_attr, x0)
-
-        y_kb = y_clue + 3
-        for i, row in enumerate(["qwertyuiop", "asdfghjkl", "zxcvbnm"]):
-            x = (w - (len(row) * 4 - 1)) // 2
-            for j, ch in enumerate(row):
-                attr = self.tile_attr(self.used[ch]) if ch in self.used else self.pair(8) | curses.A_DIM
-                self.put(y_kb + i, f" {ch.upper()} ", attr, x + j * 4)
-
-        if self.mode == "playing":
-            help_text = "Enter: guess  Bksp: delete  Alt+H: hint  Alt+U: undo  Esc: menu"
-        else:
-            help_text = "Enter: play again  Esc: menu"
-        self.put(y_kb + 4, help_text, self.pair(8) | curses.A_DIM)
-        self.stdscr.refresh()
-
-    # -- main loop --------------------------------------------------------
-    ENTER_KEYS = (10, 13, curses.KEY_ENTER)
-    BACK_KEYS = (8, 127, curses.KEY_BACKSPACE)
-
-    def run(self):
-        while True:
-            if self.mode == "menu":
-                self.draw_menu()
-            elif self.mode == "stats":
-                self.draw_stats()
-            elif self.mode == "difficulty":
-                self.draw_difficulty()
+        def set_letter(self, ch: str, mark: str = "") -> None:
+            self.update(ch.upper() if ch else " ")
+            self.remove_class("empty", "active", "correct", "present", "absent")
+            if mark:
+                self.add_class({"g": "correct", "y": "present", "x": "absent"}[mark])
+            elif ch:
+                self.add_class("active")
             else:
-                self.draw_game()
+                self.add_class("empty")
 
-            key = self.stdscr.getch()
-            if key == curses.KEY_RESIZE:
-                continue
+    class Key(Static):
+        """A single keyboard key."""
 
-            if self.mode == "menu":
-                if key in (curses.KEY_UP, ord("k")):
-                    self.menu_sel = (self.menu_sel - 1) % 4
-                elif key in (curses.KEY_DOWN, ord("j")):
-                    self.menu_sel = (self.menu_sel + 1) % 4
-                elif key in (ord("1"), ord("2"), ord("3"), ord("4")):
-                    self.menu_sel = key - ord("1")
-                elif key in self.ENTER_KEYS:
-                    if self.menu_sel == 0:
-                        self.reset_game()
-                    elif self.menu_sel == 1:
-                        self.mode = "stats"
-                    elif self.menu_sel == 2:
-                        self.mode = "difficulty"
+        def __init__(self, ch: str):
+            super().__init__(ch.upper(), id=f"key-{ch}")
+            self.ch = ch
+
+        def set_mark(self, mark: str | None) -> None:
+            self.remove_class("correct", "present", "absent")
+            if mark == "g":
+                self.add_class("correct")
+            elif mark == "y":
+                self.add_class("present")
+            elif mark == "x":
+                self.add_class("absent")
+
+    class WordGuessApp(App):
+        CSS = """
+        Screen {
+            background: #121213;
+            color: #ffffff;
+        }
+
+        #title {
+            color: #ffffff;
+            text-style: bold;
+            text-align: center;
+            margin: 1 0;
+        }
+
+        #subtitle {
+            text-align: center;
+            color: #878a8c;
+            margin: 0 0 1 0;
+        }
+
+        #views {
+            height: 1fr;
+            align: center middle;
+        }
+
+        .view {
+            display: none;
+        }
+
+        .view.active {
+            display: block;
+        }
+
+        /* ---------- menu ---------- */
+        #menu {
+            align: center middle;
+        }
+
+        #menu Vertical {
+            align: center middle;
+        }
+
+        .menu-btn {
+            width: 26;
+            height: 3;
+            margin: 1;
+            color: #ffffff;
+            background: #3a3a3c;
+            border: solid #565759;
+            text-align: center;
+        }
+
+        .menu-btn:hover {
+            background: #565759;
+            border: solid #ffffff;
+        }
+
+        .menu-btn.-active {
+            background: #6aaa64;
+            border: solid #6aaa64;
+            color: #000000;
+        }
+
+        /* ---------- game ---------- */
+        #game {
+            align: center middle;
+        }
+
+        #header-row {
+            layout: horizontal;
+            align: center middle;
+            width: 100%;
+            height: 3;
+            margin: 0 0 1 0;
+        }
+
+        #diff-chip {
+            width: 22;
+            height: 1;
+            color: #000000;
+            background: #c9b458;
+            text-align: center;
+            text-style: bold;
+            margin: 0 1;
+        }
+
+        #stats-line {
+            color: #878a8c;
+            text-align: center;
+            width: 1fr;
+        }
+
+        #clue {
+            text-align: center;
+            color: #c9b458;
+            text-style: bold;
+            margin: 0 0 1 0;
+        }
+
+        GuessRow {
+            layout: horizontal;
+            align: center middle;
+            height: 3;
+            margin: 0 0 1 0;
+        }
+
+        Tile {
+            width: 6;
+            height: 3;
+            margin: 0 1;
+            border: solid #3a3a3c;
+            color: #ffffff;
+            text-align: center;
+            text-style: bold;
+        }
+
+        Tile.empty {
+            color: #3a3a3c;
+        }
+
+        Tile.active {
+            border: solid #ffffff;
+            color: #ffffff;
+        }
+
+        Tile.correct {
+            background: #6aaa64;
+            border: #6aaa64;
+            color: #000000;
+        }
+
+        Tile.present {
+            background: #c9b458;
+            border: #c9b458;
+            color: #000000;
+        }
+
+        Tile.absent {
+            background: #3a3a3c;
+            border: #3a3a3c;
+            color: #ffffff;
+        }
+
+        Tile.flip-in {
+            animation: flip-in 150ms ease-in forwards;
+        }
+
+        Tile.flip-out {
+            animation: flip-out 150ms ease-out forwards;
+        }
+
+        @keyframes flip-in {
+            0% { transform: rotateY(0deg); }
+            100% { transform: rotateY(90deg); }
+        }
+
+        @keyframes flip-out {
+            0% { transform: rotateY(90deg); }
+            100% { transform: rotateY(0deg); }
+        }
+
+        #message {
+            text-align: center;
+            margin: 1 0;
+            color: #ff3b30;
+            text-style: bold;
+        }
+
+        #keyboard {
+            align: center middle;
+            margin: 2 0 0 0;
+        }
+
+        KeyRow {
+            layout: horizontal;
+            align: center middle;
+            height: 1;
+            margin: 0 0 1 0;
+        }
+
+        Key {
+            width: 3;
+            height: 1;
+            margin: 0 1;
+            color: #ffffff;
+            text-align: center;
+            text-style: bold;
+        }
+
+        Key.correct {
+            background: #6aaa64;
+            color: #000000;
+        }
+
+        Key.present {
+            background: #c9b458;
+            color: #000000;
+        }
+
+        Key.absent {
+            background: #3a3a3c;
+            color: #ffffff;
+        }
+
+        /* ---------- stats / difficulty ---------- */
+        #stats-view, #diff-view {
+            align: center middle;
+        }
+
+        #stats-view Vertical, #diff-view Vertical {
+            align: center middle;
+        }
+
+        .stat-line {
+            text-align: center;
+            color: #ffffff;
+            margin: 0 0 0 0;
+        }
+
+        .hint {
+            color: #878a8c;
+            text-align: center;
+            margin: 1 0 0 0;
+        }
+
+        #footer {
+            text-align: center;
+            color: #878a8c;
+            margin: 1 0 0 0;
+        }
+        """
+
+        BINDINGS = [
+            Binding("enter", "submit", "Submit guess", show=True),
+            Binding("backspace", "delete", "Delete", show=True),
+            Binding("delete", "delete", "Delete", show=True),
+            Binding("escape", "menu", "Menu / Quit", show=True),
+            Binding("alt+h", "hint", "Hint", show=True),
+            Binding("alt+u", "undo", "Undo", show=True),
+            Binding("q", "quit", "Quit", show=False),
+        ]
+
+        def __init__(self):
+            super().__init__()
+            self.stats = GameStats(STATS_FILE)
+            self.difficulty = "medium"
+            self.hard_override = False
+            self.secret = ""
+            self.tries_allowed = 6
+            self.hints_left = 1
+            self.hard_mode = False
+            self.guesses = []          # list of (word, marks)
+            self.current = ""
+            self.used = {}             # letter -> best mark
+            self.state = "menu"        # menu | playing | won | lost | stats | difficulty
+            self.message = ""
+            self.hints_used = 0
+            self.undos_used = 0
+            self.clue = ["_"] * WORD_LEN
+            self.hinted = set()
+            self.rows = {}             # (r, c) -> Tile
+            self.keys = {}             # ch -> Key
+            self.animating = False
+
+        # -- composition ---------------------------------------------------
+        def compose(self) -> ComposeResult:
+            yield Label("WORD GUESS", id="title")
+            yield Static("Guess the secret word before you run out of tries.", id="subtitle")
+            with Container(id="views"):
+                yield self._menu_view()
+                yield self._game_view()
+                yield self._stats_view()
+                yield self._diff_view()
+            yield Footer()
+            yield Static("Enter: submit  Bksp: delete  Alt+H: hint  Alt+U: undo  Esc: menu", id="footer")
+
+        def _menu_view(self) -> Container:
+            with Container(id="menu", classes="view active") as m:
+                yield Vertical(
+                    Button("1  Play", id="btn-play", classes="menu-btn -active"),
+                    Button("2  Stats", id="btn-stats", classes="menu-btn"),
+                    Button("3  Difficulty", id="btn-diff", classes="menu-btn"),
+                    Button("4  Quit", id="btn-quit", classes="menu-btn"),
+                )
+                yield Static(f"Difficulty: {DIFFICULTIES[self.difficulty]['label']}", id="menu-diff")
+                yield Static(f"Streak: {self.stats.streak}  ·  Best: {self.stats.max_streak}", id="menu-streak")
+            return m
+
+        def _game_view(self) -> Container:
+            with Container(id="game", classes="view") as g:
+                with Horizontal(id="header-row"):
+                    yield Static("Medium", id="diff-chip")
+                    yield Static("", id="stats-line")
+                yield Static("", id="clue")
+                for r in range(8):  # max possible tries
+                    with Horizontal(classes="GuessRow", id=f"row-{r}"):
+                        for c in range(WORD_LEN):
+                            yield Tile(r, c)
+                yield Static("", id="message")
+                with Container(id="keyboard"):
+                    for i, row in enumerate(["qwertyuiop", "asdfghjkl", "zxcvbnm"]):
+                        with Horizontal(classes="KeyRow", id=f"krow-{i}"):
+                            for ch in row:
+                                yield Key(ch)
+            return g
+
+        def _stats_view(self) -> Container:
+            with Container(id="stats-view", classes="view") as s:
+                with Vertical():
+                    yield Static("S T A T S", classes="stat-line")
+                    yield Static(f"Games played : {self.stats.games}", classes="stat-line")
+                    yield Static(f"Games won    : {self.stats.wins}", classes="stat-line")
+                    yield Static(f"Win rate     : {self.stats.wins * 100 // max(1, self.stats.games)}%", classes="stat-line")
+                    yield Static(f"Current streak: {self.stats.streak}   Best streak : {self.stats.max_streak}", classes="stat-line")
+                    yield Static(f"Hard-mode wins: {self.stats.hard_wins}", classes="stat-line")
+                    yield Static(f"Hints used   : {self.stats.total_hints}   Undos used   : {self.stats.total_undos}", classes="stat-line")
+                    yield Static("", id="stats-dist")
+                    yield Static("Press any key to return", classes="hint")
+            return s
+
+        def _diff_view(self) -> Container:
+            with Container(id="diff-view", classes="view") as d:
+                with Vertical():
+                    yield Static("D I F F I C U L T Y", classes="stat-line")
+                    yield Static("Pick a difficulty:", classes="stat-line")
+                    yield Button("1  Easy   (8 tries, 2 hints)", id="d-easy", classes="menu-btn")
+                    yield Button("2  Medium (6 tries, 1 hint)", id="d-medium", classes="menu-btn")
+                    yield Button("3  Hard   (5 tries, hard mode)", id="d-hard", classes="menu-btn")
+                    yield Static("", id="diff-hard-note")
+                    yield Static("Press any key to return", classes="hint")
+            return d
+
+        # -- lifecycle -----------------------------------------------------
+        def on_mount(self) -> None:
+            self.refresh_ui()
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            bid = event.button.id
+            if self.state == "menu":
+                if bid == "btn-play":
+                    self.start_game()
+                elif bid == "btn-stats":
+                    self.state = "stats"
+                elif bid == "btn-diff":
+                    self.state = "difficulty"
+                elif bid == "btn-quit":
+                    self.exit()
+            elif self.state == "difficulty":
+                if bid == "d-easy":
+                    self.difficulty = "easy"
+                elif bid == "d-medium":
+                    self.difficulty = "medium"
+                elif bid == "d-hard":
+                    self.difficulty = "hard"
+                self.refresh_diff_view()
+            self.refresh_ui()
+
+        def on_key(self, event: Key) -> None:
+            ch = event.character or ""
+
+            # ----- non-playing states: navigate with number keys -----
+            if self.state == "menu":
+                if ch == "1":
+                    self.start_game()
+                elif ch == "2":
+                    self.state = "stats"
+                elif ch == "3":
+                    self.state = "difficulty"
+                elif ch == "4":
+                    self.exit()
+                self.refresh_ui()
+                return
+
+            if self.state == "difficulty":
+                if ch == "1":
+                    self.difficulty = "easy"
+                elif ch == "2":
+                    self.difficulty = "medium"
+                elif ch == "3":
+                    self.difficulty = "hard"
+                self.refresh_diff_view()
+                self.refresh_ui()
+                return
+
+            if self.state in ("stats", "won", "lost"):
+                if event.key == "enter" and self.state in ("won", "lost"):
+                    self.start_game()
+                else:
+                    self.state = "menu"
+                self.refresh_ui()
+                return
+
+            if self.state not in ("playing",):
+                return
+
+            # ----- playing state -----
+            if self.animating:
+                return
+
+            key = event.key
+
+            if key == "enter":
+                self.action_submit()
+            elif key in ("backspace", "delete"):
+                self.action_delete()
+            elif key == "escape":
+                self.action_menu()
+            elif ch and ch.isalpha() and len(self.current) < WORD_LEN:
+                self.current += ch.lower()
+                self.message = ""
+                self.refresh_ui()
+
+        # -- actions -------------------------------------------------------
+        def action_submit(self) -> None:
+            if self.state != "playing" or self.animating:
+                return
+            if len(self.current) != WORD_LEN:
+                self.show_message("Not enough letters", "#ff3b30")
+                return
+            ok, why = self.hard_ok(self.current)
+            if not ok:
+                self.show_message(why, "#ff3b30")
+                return
+            self.submit_guess(self.current)
+
+        def action_delete(self) -> None:
+            if self.state == "playing" and not self.animating:
+                self.current = self.current[:-1]
+                self.message = ""
+                self.refresh_ui()
+
+        def action_menu(self) -> None:
+            if self.state == "playing":
+                self.state = "menu"
+            elif self.state == "menu":
+                self.exit()
+            else:
+                self.state = "menu"
+            self.refresh_ui()
+
+        def action_hint(self) -> None:
+            if self.state != "playing" or self.animating:
+                return
+            self.do_hint()
+
+        def action_undo(self) -> None:
+            if self.state != "playing" or self.animating:
+                return
+            self.do_undo()
+
+        def action_quit(self) -> None:
+            self.exit()
+
+        # -- game flow -----------------------------------------------------
+        def start_game(self) -> None:
+            d = DIFFICULTIES[self.difficulty]
+            self.secret = random.choice(WORDS)
+            self.tries_allowed = d["tries"]
+            self.hints_left = d["hints"]
+            self.hard_mode = d["hard"] or self.hard_override
+            self.guesses = []
+            self.current = ""
+            self.used = {}
+            self.state = "playing"
+            self.message = ""
+            self.hints_used = 0
+            self.undos_used = 0
+            self.clue = ["_"] * WORD_LEN
+            self.hinted = set()
+            self.animating = False
+            self.refresh_ui()
+
+        def hard_ok(self, guess: str):
+            if not self.hard_mode or not self.guesses:
+                return True, ""
+            green_at = {}
+            must_have = {}
+            for word, marks in self.guesses:
+                for i, (c, m) in enumerate(zip(word, marks)):
+                    if m == "g":
+                        green_at[i] = c
+                    if m in ("g", "y"):
+                        must_have[c] = must_have.get(c, 0) + 1
+            counts = {}
+            for c in guess:
+                counts[c] = counts.get(c, 0) + 1
+            for i, c in enumerate(guess):
+                if i in green_at and green_at[i] != c:
+                    return False, f"Position {i + 1} must be {green_at[i].upper()}."
+            for c, need in must_have.items():
+                if counts.get(c, 0) < need:
+                    return False, f"Must use {c.upper()} at least {need} time(s)."
+            for c in guess:
+                if self.used.get(c) == "x":
+                    return False, f"{c.upper()} is not in the word."
+            return True, ""
+
+        def submit_guess(self, guess: str) -> None:
+            marks = score(self.secret, guess)
+            self.guesses.append((guess, marks))
+            # flip animation, one tile at a time
+            self.animating = True
+            for c in range(WORD_LEN):
+                self.flip_tile(len(self.guesses) - 1, c, guess[c], marks[c])
+            self.animating = False
+            for ch, m in zip(guess, marks):
+                if ch not in self.used or RANK[m] > RANK[self.used[ch]]:
+                    self.used[ch] = m
+            self.refresh_keyboard()
+            if guess == self.secret:
+                self.state = "won"
+                self.stats.record(True, len(self.guesses), self.hard_mode, self.hints_used, self.undos_used)
+                praise = ["Genius!", "Magnificent!", "Splendid!", "Impressive!", "Great!", "Phew!"]
+                self.show_message(f"{praise[min(len(self.guesses) - 1, 5)]} Solved in {len(self.guesses)}!", "#6aaa64")
+            elif len(self.guesses) == self.tries_allowed:
+                self.state = "lost"
+                self.stats.record(False, None, self.hard_mode, self.hints_used, self.undos_used)
+                self.show_message(f"Out of tries. The word was {self.secret.upper()}.", "#ff3b30")
+
+        async def flip_tile(self, r: int, c: int, letter: str, mark: str) -> None:
+            tile = self.rows[(r, c)]
+            tile.add_class("flip-in")
+            await self._sleep(0.15)
+            tile.set_letter(letter, mark)
+            tile.remove_class("flip-in")
+            tile.add_class("flip-out")
+            await self._sleep(0.15)
+            tile.remove_class("flip-out")
+
+        async def _sleep(self, seconds: float) -> None:
+            # Textual provides a way to sleep within the app loop.
+            import asyncio
+            await asyncio.sleep(seconds)
+
+        def do_hint(self) -> None:
+            if self.hints_left <= 0:
+                self.show_message("No hints left.", "#ff3b30")
+                return
+            avail = [i for i in range(WORD_LEN) if i not in self.hinted]
+            if not avail:
+                self.show_message("Every position revealed.", "#ff3b30")
+                return
+            i = random.choice(avail)
+            self.hinted.add(i)
+            self.hints_left -= 1
+            self.hints_used += 1
+            self.clue[i] = self.secret[i]
+            self.show_message(f"Hint: position {i + 1} is {self.secret[i].upper()}!", "#c9b458")
+            self.refresh_clue()
+
+        def do_undo(self) -> None:
+            if not self.guesses:
+                self.show_message("Nothing to undo.", "#ff3b30")
+                return
+            if self.undos_used >= 1:
+                self.show_message("No undos left this game.", "#ff3b30")
+                return
+            self.guesses.pop()
+            self.undos_used += 1
+            self.used = {}
+            for word, marks in self.guesses:
+                for ch, m in zip(word, marks):
+                    if ch not in self.used or RANK[m] > RANK[self.used[ch]]:
+                        self.used[ch] = m
+            # clear the animated tiles for the undone row
+            r = len(self.guesses)
+            for c in range(WORD_LEN):
+                self.rows[(r, c)].set_letter("")
+            self.show_message("Undid last guess.", "#6aaa64")
+            self.refresh_keyboard()
+
+        # -- refresh -------------------------------------------------------
+        def refresh_ui(self) -> None:
+            # toggle views
+            for vid in ("menu", "game", "stats-view", "diff-view"):
+                widget = self.query_one(f"#{vid}")
+                widget.remove_class("active")
+            self.query_one(f"#{self.state}-view" if self.state in ("menu", "stats", "difficulty") else "#game").add_class("active")
+
+            if self.state == "menu":
+                self.refresh_menu()
+            elif self.state == "playing":
+                self.refresh_game()
+            elif self.state == "stats":
+                self.refresh_stats()
+            elif self.state == "difficulty":
+                self.refresh_diff_view()
+
+        def refresh_menu(self) -> None:
+            self.query_one("#menu-diff").update(f"Difficulty: {DIFFICULTIES[self.difficulty]['label']}")
+            self.query_one("#menu-streak").update(f"Streak: {self.stats.streak}  ·  Best: {self.stats.max_streak}")
+
+        def refresh_game(self) -> None:
+            d = DIFFICULTIES[self.difficulty]
+            self.query_one("#diff-chip").update(d["label"])
+            rate = self.stats.wins * 100 // max(1, self.stats.games)
+            self.query_one("#stats-line").update(f"{d['tries']} tries  ·  hints left: {self.hints_left}  ·  win rate {rate}%")
+            self.refresh_clue()
+            # tiles
+            max_r = max(self.tries_allowed, len(self.guesses))
+            for r in range(max_r):
+                for c in range(WORD_LEN):
+                    tile = self.rows[(r, c)]
+                    if r < len(self.guesses):
+                        word, marks = self.guesses[r]
+                        tile.set_letter(word[c], marks[c])
+                    elif r == len(self.guesses) and self.state == "playing":
+                        tile.set_letter(self.current[c] if c < len(self.current) else "", "")
                     else:
-                        return
-                elif key == 27:
-                    return
+                        tile.set_letter("")
+            self.refresh_keyboard()
+            if self.message:
+                self.show_message(self.message, "#ffffff", temporary=False)
+            else:
+                self.query_one("#message").update("")
 
-            elif self.mode == "stats":
-                if key != curses.KEY_RESIZE:
-                    self.mode = "menu"
+        def refresh_clue(self) -> None:
+            self.query_one("#clue").update("Clue: " + " ".join(self.clue))
 
-            elif self.mode == "difficulty":
-                if key in (ord("1"), ord("2"), ord("3")):
-                    self.difficulty = list(DIFFICULTIES)[key - ord("1")]
-                elif key in (ord("t"), ord("T")):
-                    self.hard_override = not self.hard_override
-                elif key in self.ENTER_KEYS:
-                    self.reset_game()
-                elif key == 27:
-                    self.mode = "menu"
+        def refresh_keyboard(self) -> None:
+            for ch, key in self.keys.items():
+                key.set_mark(self.used.get(ch))
 
-            elif self.mode in ("won", "lost"):
-                if key in self.ENTER_KEYS:
-                    self.reset_game()
-                elif key == 27:
-                    self.mode = "menu"
+        def refresh_stats(self) -> None:
+            lines = [
+                f"Games played : {self.stats.games}",
+                f"Games won    : {self.stats.wins}",
+                f"Win rate     : {self.stats.wins * 100 // max(1, self.stats.games)}%",
+                f"Current streak: {self.stats.streak}   Best streak : {self.stats.max_streak}",
+                f"Hard-mode wins: {self.stats.hard_wins}",
+                f"Hints used   : {self.stats.total_hints}   Undos used   : {self.stats.total_undos}",
+            ]
+            # build dist line
+            dist = "  ".join(f"{t}:{self.stats.distribution.get(str(t), 0)}" for t in range(1, 9))
+            lines.append("")
+            lines.append(f"Distribution : {dist}")
+            self.query_one("#stats-dist").update("\n".join(lines))
 
-            elif self.mode == "playing":
-                if key == 27:
-                    # Alt+key arrives as ESC <char>; plain ESC should feel instant.
-                    self.stdscr.timeout(50)
-                    meta = self.stdscr.getch()
-                    self.stdscr.timeout(-1)  # back to blocking
-                    if meta == ord("h") or meta == ord("H"):
-                        self.do_hint()
-                    elif meta == ord("u") or meta == ord("U"):
-                        self.do_undo()
-                    else:
-                        self.mode = "menu"
-                elif key in self.BACK_KEYS:
-                    self.current = self.current[:-1]
-                    self.message = ""
-                elif key in self.ENTER_KEYS:
-                    self.submit_guess()
-                elif key in (ord("h"), ord("H")):
-                    self.do_hint()
-                elif key in (ord("u"), ord("U")):
-                    self.do_undo()
-                elif (97 <= key <= 122 or 65 <= key <= 90) and len(self.current) < WORD_LEN:
-                    self.current += chr(key).lower()
-                    self.message = ""
+        def refresh_diff_view(self) -> None:
+            d = DIFFICULTIES[self.difficulty]
+            note = f"Selected: {d['label']}  ·  {d['tries']} tries, {d['hints']} hint{'s' if d['hints'] != 1 else ''}"
+            if d["hard"]:
+                note += "   ·   hard mode forced"
+            self.query_one("#diff-hard-note").update(note)
+            # highlight selected button
+            for key in ("d-easy", "d-medium", "d-hard"):
+                btn = self.query_one(f"#{key}")
+                btn.remove_class("-active")
+                if key == f"d-{self.difficulty}":
+                    btn.add_class("-active")
+
+        def show_message(self, text: str, color: str, temporary: bool = True) -> None:
+            msg = self.query_one("#message")
+            msg.update(text)
+            msg.styles.color = color
+            self.message = text
+
+    def run_textual() -> None:
+        WordGuessApp().run()
 
 
 # ---------------------------------------------------------------------------
@@ -628,7 +925,6 @@ def play_plain(diff: str, stats: GameStats) -> bool:
         if len(guess) != WORD_LEN or not guess.isalpha():
             print("  Enter exactly 5 letters.")
             continue
-        # hard mode validation
         ok = True
         if hard and guesses:
             green_at = {}
@@ -667,8 +963,17 @@ def play_plain(diff: str, stats: GameStats) -> bool:
         for c, m in zip(guess, marks):
             if c not in used or RANK[m] > RANK[used[c]]:
                 used[c] = m
-        print("  " + render(guess, marks))
-        print(keyboard(used))
+        colors = {"g": "\033[42;30m", "y": "\033[43;30m", "x": "\033[100;97m"}
+        reset = "\033[0m"
+        bold = "\033[1m"
+        print("  " + " ".join(f"{colors[m]}{bold} {g.upper()} {reset}" for g, m in zip(guess, marks)))
+        rows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
+        for i, row in enumerate(rows):
+            cells = [
+                f"{colors[used[c]]}{bold} {c.upper()} {reset}" if c in used else f"\033[2m {c.upper()} {reset}"
+                for c in row
+            ]
+            print(" " * (i * 2) + "".join(cells))
         if guess == secret:
             praise = ["Genius!", "Magnificent!", "Splendid!", "Impressive!", "Great!", "Phew!"]
             print(f"  {praise[min(tries - 1, 5)]} You got it in {tries}! The word was {secret.upper()}.")
@@ -688,7 +993,6 @@ def main_plain() -> None:
     choice = input("Choose 1-3 [2]: ").strip()
     diff = {"1": "easy", "2": "medium", "3": "hard"}.get(choice, "medium")
     while True:
-        stats.games += 0  # no-op; play_plain records via stats.record
         play_plain(diff, stats)
         rate = stats.wins * 100 // max(1, stats.games)
         print(f"Record: {stats.wins} won / {stats.games} played  ·  "
@@ -718,19 +1022,11 @@ def main_plain() -> None:
 def main() -> None:
     if "--plain" in sys.argv[1:]:
         return main_plain()
-    try:
-        if curses is None:
-            raise ImportError("curses not available")
-    except ImportError:
-        print("The full-screen UI needs curses. On Windows it is built into Python 3.13+.")
-        print("Starting plain text mode instead.\n")
+    if App is None:
+        print("Textual is not installed. Run: pip install textual")
+        print("Falling back to plain text mode.\n")
         return main_plain()
-    os.environ.setdefault("ESCDELAY", "25")  # make Esc respond instantly
-    try:
-        curses.wrapper(lambda stdscr: UI(stdscr).run())
-    except curses.error as e:
-        print(f"Could not start the full-screen UI ({e}). Starting plain text mode.\n")
-        main_plain()
+    run_textual()
 
 
 if __name__ == "__main__":
@@ -743,7 +1039,6 @@ if __name__ == "__main__":
         assert score("crane", "error") == list("ygxxx")
         assert all(len(w) == 5 and w.isalpha() for w in WORDS), "bad word in list"
         assert len(WORDS) == len(set(WORDS)), "duplicate words"
-        # stats round-trip
         fd, tmp = tempfile.mkstemp(suffix=".json")
         os.close(fd)
         try:
